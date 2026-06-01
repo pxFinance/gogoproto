@@ -961,6 +961,8 @@ var unmarshalingShouldError = []struct {
 	{"StringValue containing invalid character", `{"str": "\U00004E16\U0000754C"}`, &pb.KnownTypes{}},
 	{"StructValue containing invalid character", `{"str": "\U00004E16\U0000754C"}`, &types.Struct{}},
 	{"repeated proto3 enum with non array input", `{"rFunny":"PUNS"}`, &proto3pb.Message{RFunny: []proto3pb.Message_Humour{}}},
+	{"oneof conflict: two fields from the same group", `{"title":"foo","salary":31000}`, new(pb.MsgWithOneof)},
+	{"oneof conflict: camelCase and orig_name from the same group", `{"Country":"Australia","homeAddress":"Brisbane"}`, new(pb.MsgWithOneof)},
 }
 
 func TestUnmarshalingBadInput(t *testing.T) {
@@ -969,6 +971,66 @@ func TestUnmarshalingBadInput(t *testing.T) {
 		if err == nil {
 			t.Errorf("an error was expected when parsing %q instead of an object", tt.desc)
 		}
+	}
+}
+
+func TestUnmarshalOneofNullIsIgnored(t *testing.T) {
+	tests := []struct {
+		desc string
+		in   string
+		want *pb.MsgWithOneof
+	}{
+		{
+			desc: "single null member",
+			in:   `{"title":null}`,
+			want: &pb.MsgWithOneof{},
+		},
+		{
+			desc: "null member with concrete sibling",
+			in:   `{"title":null,"salary":31000}`,
+			want: &pb.MsgWithOneof{Union: &pb.MsgWithOneof_Salary{Salary: 31000}},
+		},
+		{
+			desc: "concrete sibling with null member",
+			in:   `{"salary":31000,"title":null}`,
+			want: &pb.MsgWithOneof{Union: &pb.MsgWithOneof_Salary{Salary: 31000}},
+		},
+	}
+
+	for _, tt := range tests {
+		var msg pb.MsgWithOneof
+		if err := UnmarshalString(tt.in, &msg); err != nil {
+			t.Fatalf("%s: %v", tt.desc, err)
+		}
+
+		got := proto.MarshalTextString(&msg)
+		want := proto.MarshalTextString(tt.want)
+		if got != want {
+			t.Errorf("%s: got [%s] want [%s]", tt.desc, got, want)
+		}
+	}
+}
+
+// TestUnmarshalOneofConflictDeterminism verifies that unmarshalling a JSON
+// object containing multiple keys from the same oneof group always produces a
+// consistent result. Before the fix the outcome depended on random map
+// iteration order, so different runs could decode different oneof variants.
+func TestUnmarshalOneofConflictDeterminism(t *testing.T) {
+	const runs = 100
+	seen := make(map[string]struct{})
+	for range runs {
+		var msg pb.MsgWithOneof
+		err := UnmarshalString(`{"title":"foo","salary":31000}`, &msg)
+		var key string
+		if err != nil {
+			key = "error:" + err.Error()
+		} else {
+			key = proto.MarshalTextString(&msg)
+		}
+		seen[key] = struct{}{}
+	}
+	if len(seen) > 1 {
+		t.Errorf("non-deterministic unmarshal: got %d different outcomes over %d runs", len(seen), runs)
 	}
 }
 
